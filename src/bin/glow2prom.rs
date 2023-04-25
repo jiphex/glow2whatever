@@ -11,9 +11,10 @@ use glow2whatever::glow::{GlowPacket, Packet};
 use lazy_static::lazy_static;
 use prometheus::{IntGaugeVec, Opts, Registry, TextEncoder};
 use rumqttc::{AsyncClient, Event::Incoming, MqttOptions, Packet::Publish, QoS};
+use sd_notify::NotifyState;
 use tracing::info;
 use tracing_actix_web::TracingLogger;
-use tracing_subscriber::{EnvFilter, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, Layer};
+use tracing_subscriber::{EnvFilter, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 lazy_static! {
     pub static ref REGISTRY: Registry =
@@ -194,8 +195,10 @@ async fn main() -> std::io::Result<()> {
 
     tokio::spawn(run_mqtt());
     register_metrics().await;
+
     let d = Data::new(Mutex::new(String::from("# metrics will be available soon")));
     tokio::spawn(run_export_cacher(d.clone()));
+    let _ = sd_notify::notify(true, &[NotifyState::Ready]);
     HttpServer::new(move || App::new().app_data(Data::clone(&d)).wrap(TracingLogger::default()).service(metrics))
         .bind(args.listen_addr)?
         .run()
