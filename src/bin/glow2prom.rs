@@ -1,56 +1,61 @@
 use core::panic;
-use std::{sync::Mutex, time::Duration};
+use std::{net::SocketAddr, sync::Mutex, time::Duration};
 
 use actix_web::{
     get,
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
+use clap::Parser;
 use glow2whatever::glow::{GlowPacket, Packet};
 use lazy_static::lazy_static;
 use prometheus::{IntGaugeVec, Opts, Registry, TextEncoder};
 use rumqttc::{AsyncClient, Event::Incoming, MqttOptions, Packet::Publish, QoS};
+use tracing::info;
+use tracing_actix_web::TracingLogger;
+use tracing_subscriber::{EnvFilter, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, Layer};
 
 lazy_static! {
     pub static ref REGISTRY: Registry =
         Registry::new_custom(Some("glow".to_string()), None).expect("registry can be created");
     pub static ref CURRENT_POWER: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("current_power_wh", "Current meter power (kWh)"),
+        Opts::new("current_power_watts", "Current meter power (W)"),
         &["mpan"],
     )
     .expect("power metric can be created");
     pub static ref TOTAL_ENERGY: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("total_energy_watts", "Cumulative energy (W)"),
+        Opts::new("total_energy_watt_hours", "Cumulative energy (Wh)"),
         &["mpan"],
     )
     .expect("energy metric can be created");
     pub static ref CUMULATIVE_ENERGY_DAY: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("cumulative_energy_day", "Cumulative energy - day (W)"),
+        Opts::new("cumulative_energy_day_watt_hours", "Cumulative energy - day (Wh)"),
         &["mpan"],
     )
     .expect("energy metric can be created");
     pub static ref CUMULATIVE_ENERGY_WEEK: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("cumulative_energy_week", "Cumulative energy - week (W)"),
+        Opts::new("cumulative_energy_week_watt_hours", "Cumulative energy - week (Wh)"),
         &["mpan"],
     )
     .expect("energy metric can be created");
     pub static ref CUMULATIVE_ENERGY_MONTH: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("cumulative_energy_month", "Cumulative energy - month (W)"),
+        Opts::new("cumulative_energy_month_watt_hours", "Cumulative energy - month (Wh)"),
         &["mpan"],
     )
     .expect("energy metric can be created");
     pub static ref IMPORT_UNIT_PRICE: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("import_unit_price", "Cost per unit/kWh (centipence)"),
+        Opts::new("import_unit_price_centipence", "Cost per unit/kWh (centipence)"),
         &["mpan", "supplier"],
     )
     .expect("power metric can be created");
     pub static ref IMPORT_PRICE_STANDING_CHARGE: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("import_standing_charge", "Standing charge (centipence)"),
+        Opts::new("import_standing_charge_centipence", "Standing charge (centipence)"),
         &["mpan", "supplier"],
     )
     .expect("power metric can be created");
 }
 
+#[tracing::instrument]
 async fn register_metrics() {
     REGISTRY.register(Box::new(CURRENT_POWER.clone())).unwrap();
     REGISTRY.register(Box::new(TOTAL_ENERGY.clone())).unwrap();
@@ -71,6 +76,7 @@ async fn register_metrics() {
         .unwrap();
 }
 
+#[tracing::instrument]
 async fn glow_subscribe(client: &mut AsyncClient) {
     client
         .subscribe("glow/+/SENSOR/+", QoS::AtMostOnce)
@@ -82,8 +88,8 @@ async fn glow_subscribe(client: &mut AsyncClient) {
         .unwrap();
 }
 
+#[tracing::instrument]
 async fn handle_publish(packet: Packet) -> Result<(), &'static str> {
-    // println!("packet");
     match packet.packet {
         GlowPacket::Sensor(s) => {
             if let Some(met) = s.electricitymeter {
@@ -121,15 +127,14 @@ async fn handle_publish(packet: Packet) -> Result<(), &'static str> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn run_mqtt() {
     let mut mqttoptions = MqttOptions::new("rumqtt-sync", "boris.xyzzy.uk", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
     let (mut client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
     glow_subscribe(&mut client).await;
-    // println!("subscriptions done");
     loop {
-        // println!("waiting for packet");
         match eventloop.poll().await {
             Ok(event) => match event {
                 Incoming(Publish(evi)) => {
@@ -149,31 +154,50 @@ async fn metrics(cache: web::Data<Mutex<String>>) -> HttpResponse {
     let data = cache.as_ref().lock().unwrap();
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4")
-        .insert_header(("header", "value"))
         .body(data.clone())
 }
 
+#[tracing::instrument(level="warn",skip_all)]
+async fn export_metrics(mc: Data<Mutex<String>>) {
+    let encoder = TextEncoder::new();
+    let r_metrics = REGISTRY.gather();
+    let metout = encoder.encode_to_string(&r_metrics).unwrap();
+    let mut d = mc.as_ref().lock().unwrap();
+    *d = metout;
+
+}
+
+#[tracing::instrument(skip_all)]
 async fn run_export_cacher(mc: Data<Mutex<String>>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
-        // println!("gathering metrics");
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        let encoder = TextEncoder::new();
-        let r_metrics = REGISTRY.gather();
-        let metout = encoder.encode_to_string(&r_metrics).unwrap();
-        let mut d = mc.as_ref().lock().unwrap();
-        *d = metout;
+        interval.tick().await;
+        info!("exporting metrics");
+        export_metrics(mc.clone()).await
     }
+}
+
+#[derive(Debug, clap::Parser)]
+struct CmdArgs {
+    #[arg(short, long, default_value = "[::1]:8080")]
+    listen_addr: SocketAddr,
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let t_filter = EnvFilter::try_from_default_env().or_else(|_|EnvFilter::try_new("info")).unwrap();
+    let t_sub_fmt = tracing_subscriber::fmt::layer().with_target(false);
+    let t_journald = tracing_journald::layer().ok();
+    tracing_subscriber::registry().with(t_filter).with(t_sub_fmt).with(t_journald).init();
+
+    let args = CmdArgs::parse();
+
     tokio::spawn(run_mqtt());
     register_metrics().await;
-    // let mc = Arc::new(Mutex::new(String::new()));
     let d = Data::new(Mutex::new(String::from("# metrics will be available soon")));
     tokio::spawn(run_export_cacher(d.clone()));
-    HttpServer::new(move || App::new().app_data(Data::clone(&d)).service(metrics))
-        .bind(("::1", 8080))?
+    HttpServer::new(move || App::new().app_data(Data::clone(&d)).wrap(TracingLogger::default()).service(metrics))
+        .bind(args.listen_addr)?
         .run()
         .await?;
     todo!()
