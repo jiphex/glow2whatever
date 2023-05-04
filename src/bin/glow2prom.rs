@@ -210,7 +210,7 @@ async fn run_export_cacher(mc: Data<Mutex<String>>) {
 struct CmdArgs {
     #[arg(short, long, default_value = "[::1]:8080")]
     listen_addr: SocketAddr,
-    #[arg(short, long, default_value = "mqtt.example.com:1883")]
+    #[arg(short, long, default_value = "example.com:1883")]
     mqtt_host: String,
 }
 
