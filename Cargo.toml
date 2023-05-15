@@ -10,7 +10,7 @@ default-run = "glow2prom"
 actix-web = "4.3.1"
 buttplug = { version="7.0.2", optional = true}
 chrono = { version = "0.4.24", features = ["serde"] }
-clap = { version = "4.2.5", features = ["derive", "env"] }
+clap = { version = "4.2.7", features = ["derive", "env"] }
 lazy_static = "1.4.0"
 prometheus = "0.13.3"
 rumqttc = { version = "0.20.0", features = ["url"] }
