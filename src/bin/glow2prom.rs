@@ -17,7 +17,7 @@ use lazy_static::lazy_static;
 use prometheus::{IntGaugeVec, Opts, Registry, TextEncoder};
 use rumqttc::{AsyncClient, Event::Incoming, MqttOptions, Packet::Publish, QoS};
 use sd_notify::NotifyState;
-use tracing::{info, debug};
+use tracing::{debug, info};
 use tracing_actix_web::TracingLogger;
 use tracing_subscriber::{
     prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
@@ -67,7 +67,7 @@ lazy_static! {
         ),
         &["mpan", "supplier"],
     )
-    .expect("power metric can be created");
+    .expect("unit price metric can be created");
     pub static ref IMPORT_PRICE_STANDING_CHARGE: IntGaugeVec = IntGaugeVec::new(
         Opts::new(
             "import_standing_charge_centipence",
@@ -75,28 +75,19 @@ lazy_static! {
         ),
         &["mpan", "supplier"],
     )
-    .expect("power metric can be created");
+    .expect("standing charge metric can be created");
 }
 
 #[tracing::instrument]
-async fn register_metrics() {
-    REGISTRY.register(Box::new(CURRENT_POWER.clone())).unwrap();
-    REGISTRY.register(Box::new(TOTAL_ENERGY.clone())).unwrap();
-    REGISTRY
-        .register(Box::new(CUMULATIVE_ENERGY_DAY.clone()))
-        .unwrap();
-    REGISTRY
-        .register(Box::new(CUMULATIVE_ENERGY_WEEK.clone()))
-        .unwrap();
-    REGISTRY
-        .register(Box::new(CUMULATIVE_ENERGY_MONTH.clone()))
-        .unwrap();
-    REGISTRY
-        .register(Box::new(IMPORT_UNIT_PRICE.clone()))
-        .unwrap();
-    REGISTRY
-        .register(Box::new(IMPORT_PRICE_STANDING_CHARGE.clone()))
-        .unwrap();
+async fn register_metrics() -> prometheus::Result<()> {
+    REGISTRY.register(Box::new(CURRENT_POWER.clone()))?;
+    REGISTRY.register(Box::new(TOTAL_ENERGY.clone()))?;
+    REGISTRY.register(Box::new(CUMULATIVE_ENERGY_DAY.clone()))?;
+    REGISTRY.register(Box::new(CUMULATIVE_ENERGY_WEEK.clone()))?;
+    REGISTRY.register(Box::new(CUMULATIVE_ENERGY_MONTH.clone()))?;
+    REGISTRY.register(Box::new(IMPORT_UNIT_PRICE.clone()))?;
+    REGISTRY.register(Box::new(IMPORT_PRICE_STANDING_CHARGE.clone()))?;
+    Ok(())
 }
 
 #[tracing::instrument]
@@ -168,9 +159,9 @@ async fn run_mqtt(connect_to: SocketAddr) {
                     tokio::spawn(handle_publish(evi.try_into().unwrap()));
                 }
                 other => {
-                    debug!("other event: {:?}",other);
+                    debug!("other event: {:?}", other);
                     continue;
-                },
+                }
             },
             Err(_) => {
                 panic!("bad mqtt poll");
@@ -202,7 +193,7 @@ async fn run_export_cacher(mc: Data<Mutex<String>>) {
     loop {
         interval.tick().await;
         info!("exporting metrics");
-        export_metrics(mc.clone()).await
+        export_metrics(mc.clone()).await;
     }
 }
 
@@ -236,8 +227,11 @@ async fn main() -> std::io::Result<()> {
     // let mqtt_host: SocketAddr = args.mqtt_host.to_socket_addrs().unwrap().next().unwrap();
     let mqtt_host = host_from_str(&args.mqtt_host).ok_or(ErrorKind::InvalidData)?;
 
+    register_metrics()
+        .await
+        .expect("unable to register metrics");
+
     tokio::spawn(run_mqtt(mqtt_host));
-    register_metrics().await;
 
     let d = Data::new(Mutex::new(String::from("# metrics will be available soon")));
     tokio::spawn(run_export_cacher(d.clone()));
