@@ -1,21 +1,19 @@
-use core::panic;
 use std::{
-    io::ErrorKind,
     net::{SocketAddr, ToSocketAddrs},
-    sync::Mutex,
-    time::Duration,
+    time::Duration, sync::Mutex,
 };
 
 use actix_web::{
     get,
-    web::{self, Data},
+    web::{self, redirect, Data},
     App, HttpResponse, HttpServer,
 };
+use anyhow::anyhow;
 use clap::Parser;
 use glow2whatever::glow::{GlowPacket, Packet};
 use lazy_static::lazy_static;
 use prometheus::{IntGaugeVec, Opts, Registry, TextEncoder};
-use rumqttc::{AsyncClient, Event::Incoming, MqttOptions, Packet::Publish, QoS};
+use rumqttc::{AsyncClient, ConnectionError, Event::Incoming, MqttOptions, Packet::Publish, QoS};
 use sd_notify::NotifyState;
 use tracing::{debug, info};
 use tracing_actix_web::TracingLogger;
@@ -103,7 +101,7 @@ async fn glow_subscribe(client: &mut AsyncClient) {
 }
 
 #[tracing::instrument]
-async fn handle_publish(packet: Packet) -> Result<(), &'static str> {
+async fn handle_publish(packet: Packet, mc: Data<Mutex<String>>) -> anyhow::Result<()>{
     match packet.packet {
         GlowPacket::Sensor(s) => {
             if let Some(met) = s.electricitymeter {
@@ -135,6 +133,7 @@ async fn handle_publish(packet: Packet) -> Result<(), &'static str> {
                     .with_label_values(price_labels)
                     .set((met.energy.import.price.standingcharge * 1000_f64) as i64);
             }
+            tokio::spawn(export_metrics(mc.clone()));
             Ok(())
         }
         GlowPacket::State(_) => Ok(()),
@@ -142,9 +141,9 @@ async fn handle_publish(packet: Packet) -> Result<(), &'static str> {
 }
 
 #[tracing::instrument(skip_all)]
-async fn run_mqtt(connect_to: SocketAddr) {
+async fn run_mqtt(connect_to: SocketAddr, mc: Data<Mutex<String>>) -> Result<(), ConnectionError> {
     let mut mqttoptions = MqttOptions::new(
-        "rumqtt-sync",
+        format!("rumqtt-sync-{}", std::process::id()),
         connect_to.ip().to_string(),
         connect_to.port(),
     );
@@ -153,24 +152,24 @@ async fn run_mqtt(connect_to: SocketAddr) {
     let (mut client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
     glow_subscribe(&mut client).await;
     loop {
+        debug!("waiting for mqtt packet");
         match eventloop.poll().await {
             Ok(event) => match event {
                 Incoming(Publish(evi)) => {
-                    tokio::spawn(handle_publish(evi.try_into().unwrap()));
+                    tokio::spawn(handle_publish(evi.try_into().unwrap(), mc.clone()));
                 }
                 other => {
                     debug!("other event: {:?}", other);
                     continue;
                 }
             },
-            Err(_) => {
-                panic!("bad mqtt poll");
-            }
+            Err(e) => return Err(e),
         }
     }
 }
 
 #[get("/metrics")]
+#[tracing::instrument(level = "info", skip(cache))]
 async fn metrics(cache: web::Data<Mutex<String>>) -> HttpResponse {
     let data = cache.as_ref().lock().unwrap();
     HttpResponse::Ok()
@@ -178,23 +177,15 @@ async fn metrics(cache: web::Data<Mutex<String>>) -> HttpResponse {
         .body(data.clone())
 }
 
+/// Gather the metrics
 #[tracing::instrument(level = "warn", skip_all)]
 async fn export_metrics(mc: Data<Mutex<String>>) {
+    info!("caching metrics for HTTP");
     let encoder = TextEncoder::new();
     let r_metrics = REGISTRY.gather();
     let metout = encoder.encode_to_string(&r_metrics).unwrap();
     let mut d = mc.as_ref().lock().unwrap();
     *d = metout;
-}
-
-#[tracing::instrument(skip_all)]
-async fn run_export_cacher(mc: Data<Mutex<String>>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
-    loop {
-        interval.tick().await;
-        info!("exporting metrics");
-        export_metrics(mc.clone()).await;
-    }
 }
 
 #[derive(Debug, clap::Parser)]
@@ -209,8 +200,8 @@ fn host_from_str(input: &str) -> Option<SocketAddr> {
     input.to_socket_addrs().ok()?.next()
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let t_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info"))
         .unwrap();
@@ -224,26 +215,55 @@ async fn main() -> std::io::Result<()> {
 
     let args = CmdArgs::parse();
 
-    // let mqtt_host: SocketAddr = args.mqtt_host.to_socket_addrs().unwrap().next().unwrap();
-    let mqtt_host = host_from_str(&args.mqtt_host).ok_or(ErrorKind::InvalidData)?;
+    // Parse the address we got from the command line
+    let mqtt_host = host_from_str(&args.mqtt_host).ok_or(anyhow!("bad MQTT host"))?;
 
+    // Register all the prometheus metrics with the default registry
     register_metrics()
         .await
         .expect("unable to register metrics");
 
-    tokio::spawn(run_mqtt(mqtt_host));
+    // Setup a channel to capture errors out of the MQTT channel
+    let (failtx, mut failrx) = tokio::sync::mpsc::channel::<Result<(), ConnectionError>>(1);
 
+    // Create a cache to store the metrics in
     let d = Data::new(Mutex::new(String::from("# metrics will be available soon")));
-    tokio::spawn(run_export_cacher(d.clone()));
+
+let d2 = d.clone();
+    // Spawn a task to run the MQTT subscription
+    tokio::spawn(async move {
+        // This will await until the MQTT task finishes, which will be an error or not
+        let out = run_mqtt(mqtt_host, d2).await;
+
+        // Pop the error back into the channel
+        failtx.send(out).await.unwrap();
+    });
+
+
+    // Spawn a task to run
+    // tokio::spawn(run_export_cacher(d.clone(), metricrx));
+
+    // Notify systemd that we're OK, if we can - it doesn't really matter if we can't
     let _ = sd_notify::notify(true, &[NotifyState::Ready]);
-    HttpServer::new(move || {
+
+    // Now start the HTTP server
+    let server = HttpServer::new(move || {
         App::new()
-            .app_data(Data::clone(&d))
+            .app_data(Data::clone(&d.clone()))
             .wrap(TracingLogger::default())
             .service(metrics)
+            .service(redirect("/", "/metrics"))
     })
-    .bind(args.listen_addr)?
-    .run()
-    .await?;
-    todo!()
+    .bind(args.listen_addr)?;
+
+    // Wait for either the server to exit, or an error to pop out of the MQTT thread
+    tokio::select! {
+        _ = server.run() => {
+            Ok(())
+        }
+        Some(err) = failrx.recv() => {
+            err
+        }
+    }
+    .map_err(|e| e.into())
 }
