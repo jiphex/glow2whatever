@@ -80,6 +80,7 @@ lazy_static! {
     .expect("collection count metric can be created");
 }
 
+/// Register all the metrics with the default registry.
 #[tracing::instrument]
 async fn register_metrics() -> prometheus::Result<()> {
     REGISTRY.register(Box::new(CURRENT_POWER.clone()))?;
@@ -93,6 +94,8 @@ async fn register_metrics() -> prometheus::Result<()> {
     Ok(())
 }
 
+/// Subscribe to the necessary topics to get sensor data from the Glow MQTT
+/// service
 #[tracing::instrument(skip(client))]
 async fn glow_subscribe(client: &mut AsyncClient) {
     client
@@ -105,6 +108,9 @@ async fn glow_subscribe(client: &mut AsyncClient) {
         .unwrap();
 }
 
+/// Handle a single publish packet, recording the stats inside a Sensor packet
+/// in the Prometheus registry, or sensor info from a Sensor packet into the
+/// Sensor data cache.
 #[tracing::instrument(skip(mc, sensor))]
 async fn handle_publish(
     packet: Packet,
@@ -155,6 +161,10 @@ async fn handle_publish(
     }
 }
 
+/// Task to run the main MQTT client loop. This will first subscribe to the
+/// relevant topics, and then wait for incoming packets. For each packet that
+/// comes in, we spawn `handle_publish` to serialize the metrics into the
+/// Prometheus String that is cached for retrieval later.
 #[tracing::instrument(skip(mc, sensor))]
 async fn run_mqtt(
     client_id: &str,
@@ -189,7 +199,15 @@ async fn run_mqtt(
     }
 }
 
-/// Gather the metrics
+/// Convert the metrics into the text format so they can be scraped later. This
+/// is probably a bit of a premature optimisation, we do this whenever we're
+/// spawned when an MQTT packet arrives, but really this should probably be done
+/// whenever the metrics are requested, because unless Prometheus is configured
+/// to scrape this insanely frequently, that will happen less frequently than an
+/// MQTT packet is received.
+///
+/// The metrics are cached in the shared String (protected by the Mutex/Data)
+/// and then are retrieved later when a web request is made.
 #[tracing::instrument(skip_all)]
 async fn export_metrics(mc: Data<Mutex<String>>) {
     info!("caching metrics for HTTP");

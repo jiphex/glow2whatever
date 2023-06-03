@@ -1,10 +1,8 @@
 [package]
     name = "glow2whatever"
-    version = "0.1.0"
+    version = "1.0.0"
     edition = "2021"
     default-run = "glow2prom"
-
-    # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
     actix-web = "4.3.1"
