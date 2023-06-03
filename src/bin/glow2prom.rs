@@ -4,14 +4,9 @@ use std::{
     time::Duration,
 };
 
-use actix_web::{
-    get,
-    web::{redirect, Data},
-    App, HttpResponse, HttpServer,
-};
+use actix_web::{web::Data, App, HttpServer};
 use anyhow::anyhow;
 use clap::Parser;
-use glow2whatever::glow::{GlowPacket, Packet, State};
 use lazy_static::lazy_static;
 use prometheus::{Counter, IntGaugeVec, Opts, Registry, TextEncoder};
 use rumqttc::{AsyncClient, ConnectionError, Event::Incoming, MqttOptions, Packet::Publish, QoS};
@@ -21,6 +16,9 @@ use tracing_actix_web::TracingLogger;
 use tracing_subscriber::{
     prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
+
+use glow2whatever::glow::{GlowPacket, Packet, State};
+use glow2whatever::routes;
 
 lazy_static! {
     pub static ref REGISTRY: Registry =
@@ -81,8 +79,6 @@ lazy_static! {
     )
     .expect("collection count metric can be created");
 }
-
-const INDEX_HTML: &str = include_str!("../../web/index.html");
 
 #[tracing::instrument]
 async fn register_metrics() -> prometheus::Result<()> {
@@ -191,30 +187,6 @@ async fn run_mqtt(
             Err(e) => return Err(e),
         }
     }
-}
-
-#[get("/")]
-async fn index() -> HttpResponse {
-    HttpResponse::Ok().body(INDEX_HTML)
-}
-
-#[get("/sensor")]
-#[tracing::instrument(skip(sensor))]
-async fn sensorpage(sensor: Data<Mutex<Option<State>>>) -> HttpResponse {
-    let sensorm = sensor.lock().expect("panicked");
-    match sensorm.as_ref() {
-        None => HttpResponse::NotFound().body("sensor data not collected yet"),
-        Some(s) => HttpResponse::Ok().json(s),
-    }
-}
-
-#[get("/metrics")]
-#[tracing::instrument(skip(cache))]
-async fn metrics(cache: Data<Mutex<String>>) -> HttpResponse {
-    let data = cache.as_ref().lock().unwrap();
-    HttpResponse::Ok()
-        .content_type(prometheus::TEXT_FORMAT)
-        .body(data.clone())
 }
 
 /// Gather the metrics
@@ -326,9 +298,9 @@ async fn main() -> anyhow::Result<()> {
             .app_data(Data::clone(&d))
             .app_data(Data::clone(&s2))
             .wrap(TracingLogger::default())
-            .service(metrics)
-            .service(sensorpage)
-            .service(index)
+            .service(routes::metrics)
+            .service(routes::sensorpage)
+            .service(routes::index)
     })
     .bind(args.listen_addr)?;
 
