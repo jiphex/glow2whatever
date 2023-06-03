@@ -9,7 +9,7 @@
 [dependencies]
     actix-web = "4.3.1"
     anyhow = "1.0.71"
-    buttplug = { version = "7.0.2", optional = true }
+    buttplug = { version = "7.1.0", optional = true }
     chrono = { version = "0.4.24", features = ["serde"] }
     clap = { version = "4.2.7", features = ["derive", "env"] }
     lazy_static = "1.4.0"
