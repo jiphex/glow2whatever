@@ -1,39 +1,47 @@
 [package]
-name = "glow2whatever"
-version = "0.1.0"
-edition = "2021"
-default-run = "glow2prom"
+    name = "glow2whatever"
+    version = "0.1.0"
+    edition = "2021"
+    default-run = "glow2prom"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+    # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-actix-web = "4.3.1"
-anyhow = "1.0.71"
-buttplug = { version="7.0.2", optional = true}
-chrono = { version = "0.4.24", features = ["serde"] }
-clap = { version = "4.2.7", features = ["derive", "env"] }
-lazy_static = "1.4.0"
-prometheus = "0.13.3"
-rumqttc = { version = "0.21.0", features = ["url"] }
-sd-notify = "0.4.1"
-serde = { version = "1.0.163", features = ["derive"] }
-serde_json = "1.0.96"
-thiserror = "1.0.40"
-tokio = { version = "1.28.1", features = ["full"] }
-tracing = { version = "0.1.38", features = ["log", "release_max_level_info"] }
-tracing-actix-web = "0.7.4"
-tracing-journald = "0.3.0"
-tracing-subscriber = { version = "0.3.17", features = ["env-filter", "fmt"] }
+    actix-web = "4.3.1"
+    anyhow = "1.0.71"
+    buttplug = { version = "7.0.2", optional = true }
+    chrono = { version = "0.4.24", features = ["serde"] }
+    clap = { version = "4.2.7", features = ["derive", "env"] }
+    lazy_static = "1.4.0"
+opentelemetry-jaeger = { version = "0.18.0", features = ["reqwest"] }
+    prometheus = "0.13.3"
+    rumqttc = { version = "0.21.0", features = ["url"] }
+    sd-notify = "0.4.1"
+    serde = { version = "1.0.163", features = ["derive"] }
+    serde_json = "1.0.96"
+    thiserror = "1.0.40"
+    tokio = { version = "1.28.1", features = ["full"] }
+    tracing = { version = "0.1.38", features = [
+        "log",
+        "release_max_level_info",
+    ] }
+    tracing-actix-web = "0.7.4"
+    tracing-journald = "0.3.0"
+    tracing-opentelemetry = { version = "0.19.0", features = ["thiserror"] }
+    tracing-subscriber = { version = "0.3.17", features = [
+        "env-filter",
+        "fmt",
+    ] }
 
 [features]
-default = []
-butt = ["buttplug"]
+    default = []
+    butt = ["buttplug"]
 
 [[bin]]
-name = "glow2prom"
+    name = "glow2prom"
 
 [[bin]]
-name = "glow2butt"
-required-features = ["butt"]
+    name = "glow2butt"
+    required-features = ["butt"]
 
 [lib]

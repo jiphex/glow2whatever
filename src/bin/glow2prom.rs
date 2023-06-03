@@ -1,18 +1,19 @@
 use std::{
     net::{SocketAddr, ToSocketAddrs},
-    time::Duration, sync::Mutex,
+    sync::Mutex,
+    time::Duration,
 };
 
 use actix_web::{
     get,
-    web::{self, redirect, Data},
+    web::{redirect, Data},
     App, HttpResponse, HttpServer,
 };
 use anyhow::anyhow;
 use clap::Parser;
-use glow2whatever::glow::{GlowPacket, Packet};
+use glow2whatever::glow::{GlowPacket, Packet, State};
 use lazy_static::lazy_static;
-use prometheus::{IntGaugeVec, Opts, Registry, TextEncoder};
+use prometheus::{Counter, IntGaugeVec, Opts, Registry, TextEncoder};
 use rumqttc::{AsyncClient, ConnectionError, Event::Incoming, MqttOptions, Packet::Publish, QoS};
 use sd_notify::NotifyState;
 use tracing::{debug, info};
@@ -74,7 +75,14 @@ lazy_static! {
         &["mpan", "supplier"],
     )
     .expect("standing charge metric can be created");
+    pub static ref COLLECT_COUNT: Counter = Counter::new(
+        "metric_collection_count",
+        "Number of times metrics collected since programme start"
+    )
+    .expect("collection count metric can be created");
 }
+
+const INDEX_HTML: &str = include_str!("../../web/index.html");
 
 #[tracing::instrument]
 async fn register_metrics() -> prometheus::Result<()> {
@@ -85,23 +93,28 @@ async fn register_metrics() -> prometheus::Result<()> {
     REGISTRY.register(Box::new(CUMULATIVE_ENERGY_MONTH.clone()))?;
     REGISTRY.register(Box::new(IMPORT_UNIT_PRICE.clone()))?;
     REGISTRY.register(Box::new(IMPORT_PRICE_STANDING_CHARGE.clone()))?;
+    REGISTRY.register(Box::new(COLLECT_COUNT.clone()))?;
     Ok(())
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip(client))]
 async fn glow_subscribe(client: &mut AsyncClient) {
     client
         .subscribe("glow/+/SENSOR/+", QoS::AtMostOnce)
         .await
         .unwrap();
     client
-        .subscribe("glow/+/STATE/+", QoS::AtMostOnce)
+        .subscribe("glow/+/STATE", QoS::AtMostOnce)
         .await
         .unwrap();
 }
 
-#[tracing::instrument]
-async fn handle_publish(packet: Packet, mc: Data<Mutex<String>>) -> anyhow::Result<()>{
+#[tracing::instrument(skip(mc, sensor))]
+async fn handle_publish(
+    packet: Packet,
+    mc: Data<Mutex<String>>,
+    sensor: Data<Mutex<Option<State>>>,
+) -> anyhow::Result<()> {
     match packet.packet {
         GlowPacket::Sensor(s) => {
             if let Some(met) = s.electricitymeter {
@@ -133,20 +146,28 @@ async fn handle_publish(packet: Packet, mc: Data<Mutex<String>>) -> anyhow::Resu
                     .with_label_values(price_labels)
                     .set((met.energy.import.price.standingcharge * 1000_f64) as i64);
             }
+            COLLECT_COUNT.inc();
             tokio::spawn(export_metrics(mc.clone()));
             Ok(())
         }
-        GlowPacket::State(_) => Ok(()),
+        GlowPacket::State(st) => {
+            let mut sensor = sensor.lock().unwrap();
+            debug!("sensor info {st:?}");
+            sensor.replace(st);
+            Ok(())
+        }
     }
 }
 
-#[tracing::instrument(skip_all)]
-async fn run_mqtt(connect_to: SocketAddr, mc: Data<Mutex<String>>) -> Result<(), ConnectionError> {
-    let mut mqttoptions = MqttOptions::new(
-        format!("rumqtt-sync-{}", std::process::id()),
-        connect_to.ip().to_string(),
-        connect_to.port(),
-    );
+#[tracing::instrument(skip(mc, sensor))]
+async fn run_mqtt(
+    client_id: &str,
+    connect_to: SocketAddr,
+    mc: Data<Mutex<String>>,
+    sensor: Data<Mutex<Option<State>>>,
+) -> Result<(), ConnectionError> {
+    let mut mqttoptions =
+        MqttOptions::new(client_id, connect_to.ip().to_string(), connect_to.port());
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
     let (mut client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
@@ -156,10 +177,14 @@ async fn run_mqtt(connect_to: SocketAddr, mc: Data<Mutex<String>>) -> Result<(),
         match eventloop.poll().await {
             Ok(event) => match event {
                 Incoming(Publish(evi)) => {
-                    tokio::spawn(handle_publish(evi.try_into().unwrap(), mc.clone()));
+                    tokio::spawn(handle_publish(
+                        evi.try_into().unwrap(),
+                        mc.clone(),
+                        sensor.clone(),
+                    ));
                 }
                 other => {
-                    debug!("other event: {:?}", other);
+                    debug!("unhandled MQTT event: {:?}", other);
                     continue;
                 }
             },
@@ -168,9 +193,24 @@ async fn run_mqtt(connect_to: SocketAddr, mc: Data<Mutex<String>>) -> Result<(),
     }
 }
 
+#[get("/")]
+async fn index() -> HttpResponse {
+    HttpResponse::Ok().body(INDEX_HTML)
+}
+
+#[get("/sensor")]
+#[tracing::instrument(skip(sensor))]
+async fn sensorpage(sensor: Data<Mutex<Option<State>>>) -> HttpResponse {
+    let sensorm = sensor.lock().expect("panicked");
+    match sensorm.as_ref() {
+        None => HttpResponse::NotFound().body("sensor data not collected yet"),
+        Some(s) => HttpResponse::Ok().json(s),
+    }
+}
+
 #[get("/metrics")]
-#[tracing::instrument(level = "info", skip(cache))]
-async fn metrics(cache: web::Data<Mutex<String>>) -> HttpResponse {
+#[tracing::instrument(skip(cache))]
+async fn metrics(cache: Data<Mutex<String>>) -> HttpResponse {
     let data = cache.as_ref().lock().unwrap();
     HttpResponse::Ok()
         .content_type(prometheus::TEXT_FORMAT)
@@ -178,7 +218,7 @@ async fn metrics(cache: web::Data<Mutex<String>>) -> HttpResponse {
 }
 
 /// Gather the metrics
-#[tracing::instrument(level = "warn", skip_all)]
+#[tracing::instrument(skip_all)]
 async fn export_metrics(mc: Data<Mutex<String>>) {
     info!("caching metrics for HTTP");
     let encoder = TextEncoder::new();
@@ -190,8 +230,30 @@ async fn export_metrics(mc: Data<Mutex<String>>) {
 
 #[derive(Debug, clap::Parser)]
 struct CmdArgs {
+    /// Whether to include the process ID in the MQTT client id. This is useful
+    /// when debugging as it will allow multiple instances of the application to
+    /// be run, but should be avoided for production, as this will result in
+    /// lost messages.
+    #[arg(short, long, default_value_t = false)]
+    client_id_include_pid: bool,
+
+    /// Whether to enable jaeger tracing
+    #[arg(long, default_value_t = false)]
+    tracing_jaeger: bool,
+
+    /// Whether to enable journald tracing
+    #[arg(long, default_value_t = true)]
+    tracing_journald: bool,
+
+    /// Whether to enable stdout tracing
+    #[arg(long, default_value_t = true)]
+    tracing_stdout: bool,
+
+    /// Listen address for the HTTP server which provides the metrics/sensor interfaces
     #[arg(short, long, default_value = "[::1]:8080")]
     listen_addr: SocketAddr,
+
+    /// MQTT host/port to connect to
     #[arg(short, long, default_value = "example.com:1883")]
     mqtt_host: String,
 }
@@ -202,18 +264,27 @@ fn host_from_str(input: &str) -> Option<SocketAddr> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = CmdArgs::parse();
+
     let t_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info"))
         .unwrap();
     let t_sub_fmt = tracing_subscriber::fmt::layer().with_target(false);
-    let t_journald = tracing_journald::layer().ok();
+    let t_journald = args
+        .tracing_jaeger
+        .then_some(tracing_journald::layer().ok())
+        .flatten();
+    let tr_otel = opentelemetry_jaeger::new_agent_pipeline().install_simple()?;
+    let t_otel = args
+        .tracing_jaeger
+        .then_some(tracing_opentelemetry::layer().with_tracer(tr_otel));
     tracing_subscriber::registry()
         .with(t_filter)
+        .with(t_otel)
         .with(t_sub_fmt)
         .with(t_journald)
         .init();
-
-    let args = CmdArgs::parse();
+    debug!("command args: {args:?}");
 
     // Parse the address we got from the command line
     let mqtt_host = host_from_str(&args.mqtt_host).ok_or(anyhow!("bad MQTT host"))?;
@@ -228,31 +299,36 @@ async fn main() -> anyhow::Result<()> {
 
     // Create a cache to store the metrics in
     let d = Data::new(Mutex::new(String::from("# metrics will be available soon")));
-
-let d2 = d.clone();
+    let d2 = d.clone();
+    let sensor = Data::new(Mutex::new(Option::<State>::default()));
+    let s2 = sensor.clone();
+    let client_id = match args.client_id_include_pid {
+        false => "rumqtt-sync".to_string(),
+        true => format!("rumqtt-sync-{}", std::process::id()),
+    };
     // Spawn a task to run the MQTT subscription
     tokio::spawn(async move {
         // This will await until the MQTT task finishes, which will be an error or not
-        let out = run_mqtt(mqtt_host, d2).await;
+        let out = run_mqtt(&client_id, mqtt_host, d2, sensor).await;
 
         // Pop the error back into the channel
         failtx.send(out).await.unwrap();
     });
 
-
-    // Spawn a task to run
-    // tokio::spawn(run_export_cacher(d.clone(), metricrx));
-
-    // Notify systemd that we're OK, if we can - it doesn't really matter if we can't
+    // Notify systemd that we're OK, if we can - it doesn't really matter if we
+    // can't because we're probably running on Mac or something, so discard the
+    // result
     let _ = sd_notify::notify(true, &[NotifyState::Ready]);
 
     // Now start the HTTP server
     let server = HttpServer::new(move || {
         App::new()
-            .app_data(Data::clone(&d.clone()))
+            .app_data(Data::clone(&d))
+            .app_data(Data::clone(&s2))
             .wrap(TracingLogger::default())
             .service(metrics)
-            .service(redirect("/", "/metrics"))
+            .service(sensorpage)
+            .service(index)
     })
     .bind(args.listen_addr)?;
 

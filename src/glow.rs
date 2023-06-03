@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use rumqttc::Publish;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub struct Packet {
@@ -48,14 +48,14 @@ pub enum GlowPacket {
     Sensor(Sensor),
 }
 
-#[derive(PartialEq, Debug, Deserialize)]
+#[derive(PartialEq, Debug, Deserialize, Serialize)]
 pub struct StateHan {
     pub rssi: i32,
     pub status: String,
     pub lqi: u32,
 }
 
-#[derive(PartialEq, Debug, Deserialize)]
+#[derive(PartialEq, Debug, Deserialize, Serialize)]
 pub struct State {
     pub timestamp: DateTime<Utc>,
     pub software: String,

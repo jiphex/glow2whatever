@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+
+    <head>
+        <meta charset="UTF-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Glow IHD - OpenMetrics Exporter</title>
+    </head>
+
+    <body>
+        <h1>Glow IHD - OpenMetrics Exporter</h1>
+        <p>This is a small HTTP service which publishes metrics in the Prometheus/OpenMetrics text exposition format.
+        </p>
+        <p>The exported metrics are updated whenever a publish is received over an MQTT connection to some MQTT broker.
+        </p>
+        <h2>Endpoints</h2>
+        <p>
+        <ul>
+            <li><a href="/metrics">Metrics endpoint</a></li>
+            <li><a href="/sensor">Sensor details in JSON format (if collected)</a></li>
+        </ul>
+        </p>
+        <h2>Software</h2>
+        <p>The source for this service is available at <a href="https://github.com/jiphex/glow2whatever">this Github
+                repository</a>.</p>
+
+    </body>
+
+</html>
