@@ -290,7 +290,9 @@ async fn main() -> anyhow::Result<()> {
     // Notify systemd that we're OK, if we can - it doesn't really matter if we
     // can't because we're probably running on Mac or something, so discard the
     // result
-    let _ = sd_notify::notify(true, &[NotifyState::Ready]);
+    if let Err(err) = sd_notify::notify(true, &[NotifyState::Ready]) {
+        debug!("unable to notify systemd about service readiness, this can be ignored if not running as a systemd service: {err}");
+    }
 
     // Now start the HTTP server
     let server = HttpServer::new(move || {
